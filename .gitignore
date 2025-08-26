@@ -2,7 +2,10 @@
 __pycache__
 .vscode/
 Olds/
+arch-logs/
+warc-logs/
 *.csv
 *.txt
 
 
+``
