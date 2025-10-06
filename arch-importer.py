@@ -8,7 +8,9 @@ import os
 from datetime import datetime
 
 # Config
+
 AIP_ROOT = Path("/Volumes/Vintage-1/archCoppul/Under4gb/5-12")
+#AIP_ROOT = Path("Volumes/Vintage-1/archCoppul/Under4gb/5-12")
 CONTAINER = "viurrspace-core-pre-may-05-24"
 SEGMENT_CONTAINER = f"{CONTAINER}_segments"
 #SEGMENT_SIZE = 1024 * 1024 * 1024  # 1G
@@ -105,7 +107,7 @@ def upload_aip(aip_file: Path, attempt=1):
     filename = aip_file.name  # Just the filename, no path
 
     try:
-        # Flat upload 
+        # Flat upload (always use segment upload)
         result = subprocess.run(
             [
                 "python3", "-m", "swiftclient.shell",
@@ -118,13 +120,26 @@ def upload_aip(aip_file: Path, attempt=1):
             ],
             capture_output=True,
             text=True,
-            check=True
+            check=False,
+            timeout=60
         )
-        
-        logger.info(f"Uploaded: {filename}")
-        print(f"✔ Uploaded {filename}")
-        log_to_csv(filename, size_mb, "Success", attempt)
-        return True
+        print(f"STDOUT for {filename}:\n{result.stdout}")
+        print(f"STDERR for {filename}:\n{result.stderr}")
+        if result.returncode == 0:
+            logger.info(f"Uploaded: {filename}")
+            print(f"✔ Uploaded {filename}")
+            log_to_csv(filename, size_mb, "Success", attempt)
+            return True
+        else:
+            error_msg = result.stderr.strip()
+            logger.error(f"Failed {filename} (attempt {attempt}): {error_msg}")
+            if attempt < MAX_RETRIES:
+                print(f"↻ Retrying {filename} (attempt {attempt + 1}/{MAX_RETRIES})...")
+                return upload_aip(aip_file, attempt + 1)
+            else:
+                print(f"✗ Failed {filename} after {MAX_RETRIES} attempts")
+                log_to_csv(filename, size_mb, "Failed", attempt, error_msg)
+                return False
 
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.strip()
@@ -140,12 +155,15 @@ def upload_aip(aip_file: Path, attempt=1):
 
 def main():
     """Main execution function"""
+    print(f"AIP_ROOT: {AIP_ROOT} (exists: {AIP_ROOT.exists()})")
+    print(f"Files found: {list(AIP_ROOT.glob('*.7z'))}")
+
     print("🔐 Checking credentials...")
     check_credentials()
-    
+
     print("📦 Ensuring containers exist...")
     ensure_container_exists()
-    
+
     print("📝 Initializing logs...")
     init_csv()
 
