@@ -51,20 +51,47 @@ def log_to_csv(filename, size_mb, status, attempts=1, error=""):
 
 def save_state(uploaded_files, current_file=None, current_attempt=1):
     """Save upload state to resume later"""
-    state = {
-        'uploaded_files': uploaded_files,
-        'current_file': str(current_file) if current_file else None,
-        'current_attempt': current_attempt,
-        'timestamp': datetime.now().isoformat()
-    }
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=2)
+    try:
+        state = {
+            'uploaded_files': list(uploaded_files),  # Convert set to list for JSON
+            'current_file': str(current_file) if current_file else None,
+            'current_attempt': current_attempt,
+            'timestamp': datetime.now().isoformat()
+        }
+        # Ensure the directory exists
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"⚠️  Could not save state: {e}")
 
 def load_state():
     """Load upload state if it exists"""
     if STATE_FILE.exists():
-        with open(STATE_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(STATE_FILE, 'r') as f:
+                content = f.read().strip()
+                if not content:  # Empty file
+                    print("⚠️  State file is empty, starting fresh")
+                    return None
+                state = json.loads(content)
+                # Convert back to set
+                if 'uploaded_files' in state:
+                    state['uploaded_files'] = set(state['uploaded_files'])
+                return state
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"⚠️  Corrupted state file: {e}. Starting fresh.")
+            # Backup the corrupted file
+            backup_file = STATE_FILE.with_suffix('.json.corrupted')
+            try:
+                STATE_FILE.rename(backup_file)
+                print(f"📁 Backed up corrupted state to: {backup_file}")
+            except:
+                pass  # If backup fails, just continue
+            return None
+        except Exception as e:
+            print(f"⚠️  Error reading state file: {e}. Starting fresh.")
+            return None
     return None
 
 def cleanup_segments(filename):
