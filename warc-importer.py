@@ -8,16 +8,15 @@ import os
 from datetime import datetime
 
 # Config
-AIP_ROOT = Path("/Volumes/Backup Plus/WARC_files/WARCS_202507_Cumulative/WARCS_23169_20250709")
+AIP_ROOT = Path("/Volumes/Backup Plus/WARC_files/WARCS_202507_Cumulative/MANIFEST")
 CONTAINER = "warcs-cumulative"
 SEGMENT_CONTAINER = f"{CONTAINER}_segments"
 #SEGMENT_SIZE = 1024 * 1024 * 1024  # 1G
 SEGMENT_SIZE = 4 * 1024 * 1024 * 1024 + 500 * 1024 * 1024  # 4.5GB
 LOGFILE = Path(__file__).parent / "warc-logs" / f"{AIP_ROOT.name}-log.txt"
 CSV_SUMMARY = Path(__file__).parent / "warc-logs" / f"{AIP_ROOT.name}-upload-summary.csv"
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 TIMEOUT = 14400  # 4 hours (for 50GB+ files)
-MAX_RETRIES = 5  
 
 # Enhanced logging setup
 logging.basicConfig(
@@ -76,6 +75,30 @@ def check_credentials():
         logger.error(f"Auth failed: {e.stderr}")
         sys.exit(1)
 
+def test_connection():
+    """Test basic OpenStack connectivity"""
+    print("🔍 Testing OpenStack connection...")
+    try:
+        # Test list containers
+        result = subprocess.run(
+            ["python3", "-m", "swiftclient.shell", "list"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            print("✅ Connection test passed")
+            return True
+        else:
+            print(f"❌ Connection failed: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        print("❌ Connection test timed out - network issue?")
+        return False
+    except Exception as e:
+        print(f"❌ Connection test error: {e}")
+        return False
+
 def ensure_container_exists():
     """Create containers if they don't exist"""
     for name in [CONTAINER, SEGMENT_CONTAINER]:
@@ -116,43 +139,63 @@ def upload_aip(aip_file: Path, attempt=1):
     print(f"Calculated object name: {object_name}")
 
     try:
-        # Upload with directory structure preserved
-        result = subprocess.run(
-            [
-                "python3", "-m", "swiftclient.shell",
-                "upload",
+        # Use segment upload only for files >5GB
+        cmd = [
+            "python3", "-m", "swiftclient.shell",
+            "upload",
+        ]
+        if aip_file.stat().st_size > 5 * 1024 * 1024 * 1024:
+            cmd += [
                 "--segment-size", str(SEGMENT_SIZE),
                 "--segment-container", SEGMENT_CONTAINER,
-                CONTAINER,
-                str(aip_file),  # Full path for source
-                "--object-name", str(object_name)  # Preserve directory structure
-            ],
+            ]
+        cmd += [
+            CONTAINER,
+            str(aip_file),
+            "--object-name", str(object_name)
+        ]
+        
+        print(f"Running command: {' '.join(cmd[:5])}...")  # Don't print full path for security
+        
+        result = subprocess.run(
+            cmd,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=TIMEOUT  # Add timeout here
         )
-        
         logger.info(f"Uploaded: {object_name}")
         print(f"✔ Uploaded {object_name}")
         log_to_csv(filename, size_mb, "Success", attempt)
         return True
 
+    except subprocess.TimeoutExpired:
+        error_msg = f"Upload timed out after {TIMEOUT} seconds"
+        logger.error(f"Timeout for {object_name} (attempt {attempt}): {error_msg}")
+        print(f"⏰ Timeout for {object_name}")
+        
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.strip()
         logger.error(f"Failed {object_name} (attempt {attempt}): {error_msg}")
         
-        if attempt < MAX_RETRIES:
-            print(f"↻ Retrying {object_name} (attempt {attempt + 1}/{MAX_RETRIES})...")
-            return upload_aip(aip_file, attempt + 1)
-        else:
-            print(f"✗ Failed {object_name} after {MAX_RETRIES} attempts")
-            log_to_csv(filename, size_mb, "Failed", attempt, error_msg)
-            return False
+    # Retry logic
+    if attempt < MAX_RETRIES:
+        print(f"↻ Retrying {object_name} (attempt {attempt + 1}/{MAX_RETRIES})...")
+        return upload_aip(aip_file, attempt + 1)
+    else:
+        print(f"✗ Failed {object_name} after {MAX_RETRIES} attempts")
+        log_to_csv(filename, size_mb, "Failed", attempt, error_msg)
+        return False
 
 def main():
     """Main execution function"""
     print("🔐 Checking credentials...")
     check_credentials()
+    
+    print("🔍 Testing connection...")
+    if not test_connection():
+        print("❌ Connection test failed. Check network/credentials.")
+        sys.exit(1)
     
     print("📦 Ensuring containers exist...")
     ensure_container_exists()
@@ -175,6 +218,28 @@ def main():
     aip_files = sorted(AIP_ROOT.rglob("*"))
     aip_files = [f for f in aip_files if f.is_file()]  # Filter out directories
     print(f"\n🗂️ Found {len(aip_files)} files to upload (including subdirectories).\n")
+
+    # Test with a small file first
+    if aip_files:
+        small_files = [f for f in aip_files if f.stat().st_size < 100 * 1024 * 1024]  # < 100MB
+        if small_files:
+            print("🧪 Testing with a small file first...")
+            test_file = small_files[0]
+            print(f"Testing with: {test_file.name}")
+            if upload_aip(test_file):
+                print("✅ Test upload successful! Proceeding with all files...")
+            else:
+                print("❌ Test upload failed. Stopping.")
+                return
+        else:
+            print("⚠️  No small files found for testing, proceeding with first file...")
+            test_file = aip_files[0]
+            print(f"Testing with first file: {test_file.name}")
+            if upload_aip(test_file):
+                print("✅ Test upload successful! Proceeding with all files...")
+            else:
+                print("❌ Test upload failed. Stopping.")
+                return
 
     success_count = 0
     for aip_file in tqdm(aip_files, desc="Uploading AIPs", unit="file"):
